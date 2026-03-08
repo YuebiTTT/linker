@@ -30,10 +30,21 @@ public:
 	std::atomic<bool> followLaunchFailed{ false };
 	struct LogMessage {
 		std::wstring text;
-		DWORD startTick;  // 开始显示的时间戳（毫秒）
+		DWORD startTick;          // 开始显示的时间戳（毫秒）
+		float alpha;              // 当前透明度 (0~1)
+		float yOffset;            // Y轴偏移量（用于滑动效果）
+		int animStage;            // 0=稳定显示, 1=进入动画, 2=退出动画
+		DWORD animStartTime;      // 动画开始时间（毫秒）
+		DWORD animDuration;       // 动画持续时间（毫秒）
+
+		LogMessage(const std::wstring& t, DWORD now)
+			: text(t), startTick(now), alpha(0.0f), yOffset(20.0f),
+			animStage(1), animStartTime(now), animDuration(200) {
+		}
 	};
-	std::list<LogMessage> logMessages;  // 消息队列，最新消息在前
-	std::mutex logMutex;                // 保护队列的互斥锁
+
+	std::list<LogMessage> logMessages;
+	std::mutex logMutex;         
 
 
 	std::wstring lastText;
@@ -121,11 +132,11 @@ public:
 		}
 	}
 
-	
 	void AddLog(const std::wstring& msg) {
 		std::lock_guard<std::mutex> lock(logMutex);
-		logMessages.push_front({ msg, GetTickCount() });
-		if (logMessages.size() > 10) { 
+		DWORD now = GetTickCount();
+		logMessages.push_front(LogMessage(msg, now));
+		if (logMessages.size() > 10) {
 			logMessages.pop_back();
 		}
 	}
@@ -381,13 +392,62 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
 			const float lineHeight = 20.0f;     
 			const int maxLines = static_cast<int>(logAreaHeight / lineHeight);
 
+			{
+				std::lock_guard<std::mutex> lock(ctx->logMutex);
+				DWORD now = GetTickCount();
+
+				for (auto it = ctx->logMessages.begin(); it != ctx->logMessages.end(); ) {
+					bool remove = false;
+
+					// 检查是否该启动退出动画
+					if (it->animStage == 0 && (now - it->startTick) >= 5000) {
+						it->animStage = 2;
+						it->animStartTime = now;
+						it->animDuration = 200;
+					}
+
+					// 处理动画
+					if (it->animStage == 1) { // 进入动画
+						float progress = static_cast<float>(now - it->animStartTime) / it->animDuration;
+						if (progress >= 1.0f) {
+							it->alpha = 1.0f;
+							it->yOffset = 0.0f;
+							it->animStage = 0; // 稳定显示
+						}
+						else {
+							float eased = CalcEaseOutCurve(progress, 0, 1, 1);
+							it->alpha = eased;
+							it->yOffset = 20.0f * (1.0f - eased); // 从20px滑入
+						}
+					}
+					else if (it->animStage == 2) { // 退出动画
+						float progress = static_cast<float>(now - it->animStartTime) / it->animDuration;
+						if (progress >= 1.0f) {
+							it->alpha = 0.0f;
+							it->yOffset = 20.0f;
+							remove = true; // 动画结束，移除消息
+						}
+						else {
+							float eased = CalcEaseOutCurve(progress, 0, 1, 1);
+							it->alpha = 1.0f - eased;
+							it->yOffset = 20.0f * eased; // 向下滑出
+						}
+					}
+
+					if (remove)
+						it = ctx->logMessages.erase(it);
+					else
+						++it;
+				}
+			}
+
 			// 绘制日志
 			{
 				std::lock_guard<std::mutex> lock(ctx->logMutex);
 				DWORD now = GetTickCount();
-				\
+				
 				ctx->logMessages.remove_if([now](const MainAppContext::LogMessage& msg) {
-					return (now - msg.startTick) >= 3000;
+					return (now - msg.startTick) >= 5000;
 					});
 				
 				int line = 0;
@@ -396,8 +456,8 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
 
 					float y = logAreaY + logAreaHeight - (line + 1) * lineHeight;
 
-					D2DDrawText(hrt, it->text.c_str(), logAreaX, y, 300, lineHeight,
-						14, VERTEXUICOLOR_FOREST, L"Segoe UI", 1.0f);
+					D2DDrawText2(hrt, it->text.c_str(), logAreaX, y, 300, lineHeight,
+						14, VERTEXUICOLOR_DARKENX, L"Segoe UI", it->alpha);
 
 					line++;
 				}
