@@ -11,5 +11,10 @@
 #include <direct.h>
 #include <io.h>
 #include <regex>
+#include <thread>
+#include <atomic>
+#include <tlhelp32.h>   // 进程快照
+#include <shellapi.h>   // ShellExecute
+#include <mutex>
 
 

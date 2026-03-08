@@ -15,12 +15,26 @@ public:
 	float scrollVal=0;
 	std::vector<std::shared_ptr<VinaSideTab>> tabs;
 	std::shared_ptr<VinaButton> btn = std::make_shared<VinaButton>();
+	std::shared_ptr<VinaButton> btnf = std::make_shared<VinaButton>();
+	std::shared_ptr<VinaButton> startBtn = std::make_shared<VinaButton>();
 	std::shared_ptr<VinaSlider> sli = std::make_shared<VinaSlider>();
 	std::shared_ptr<VinaSwitch> sw = std::make_shared<VinaSwitch>();
 	std::shared_ptr<VinaFileSelector> fi = std::make_shared<VinaFileSelector>();
 	std::shared_ptr<VinaMultiTextBox> mt = std::make_shared<VinaMultiTextBox>();
 	std::shared_ptr<VinaEdit> edt = std::make_shared<VinaEdit>();
+	std::shared_ptr<VinaEdit> edtf = std::make_shared<VinaEdit>();
 	std::shared_ptr<VinaCaptionBar> capt = std::make_shared<VinaCaptionBar>();
+	std::atomic<bool> monitoring{ false };      
+	std::atomic<bool> stopMonitoring{ false };  
+	std::atomic<bool> monitoringFinished{ false };
+	std::atomic<bool> followLaunchFailed{ false };
+	struct LogMessage {
+		std::wstring text;
+		DWORD startTick;  // 开始显示的时间戳（毫秒）
+	};
+	std::list<LogMessage> logMessages;  // 消息队列，最新消息在前
+	std::mutex logMutex;                // 保护队列的互斥锁
+
 
 	std::wstring lastText;
 	std::list<CharAnim> animatingChars;
@@ -35,18 +49,18 @@ public:
 	void InitTabs() {
 		if (!tabs.empty()) return;
 		auto tab1 = std::make_shared<VinaSideTab>();
-		tab1->Set(0, 55, 120, L"DemoUI", L"test-home", 20, VuiFadeColor(VERTEXUICOLOR_WHITE,40));
+		tab1->Set(0, 55, 120, L"Link", L"test-home", 20, VuiFadeColor(VERTEXUICOLOR_WHITE,40));
 		tab1->Activate(true);
 
-		auto tab2 = std::make_shared<VinaSideTab>();
-		tab2->Set(0, 55, 120, L"Waterfall", L"test-test1", 20, VuiFadeColor(VERTEXUICOLOR_WHITE, 20));
-
+		//auto tab2 = std::make_shared<VinaSideTab>();
+		//tab2->Set(0, 55, 120, L"Waterfall", L"test-test1", 20, VuiFadeColor(VERTEXUICOLOR_WHITE, 20));
+		
 		auto tab3 = std::make_shared<VinaSideTab>();
 		tab3->Set(0, 55, 120, L"About", L"test-info", 20, VuiFadeColor(VERTEXUICOLOR_WHITE, 20));
 
 
 		tabs.push_back(tab1);
-		tabs.push_back(tab2);
+		//tabs.push_back(tab2);
 		tabs.push_back(tab3);
 	}
 
@@ -74,8 +88,63 @@ public:
 			}
 		}
 	}
+
+	void LoadPaths() {
+		HKEY hKey;
+		if (RegOpenKeyEx(HKEY_CURRENT_USER, L"Software\\Linker", 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
+			WCHAR buffer[MAX_PATH];
+			DWORD size = sizeof(buffer);
+			if (RegQueryValueEx(hKey, L"MainPath", nullptr, nullptr, (LPBYTE)buffer, &size) == ERROR_SUCCESS) {
+				edt->SetText(buffer);
+				edt->bSetText = true;
+			}
+			size = sizeof(buffer);
+			if (RegQueryValueEx(hKey, L"FollowPath", nullptr, nullptr, (LPBYTE)buffer, &size) == ERROR_SUCCESS) {
+				edtf->SetText(buffer);
+				edtf->bSetText = true;
+			}
+			RegCloseKey(hKey);
+		}
+	}
+
+	void SavePaths() {
+		HKEY hKey;
+		if (RegCreateKeyEx(HKEY_CURRENT_USER, L"Software\\Linker", 0, nullptr,
+			REG_OPTION_NON_VOLATILE, KEY_WRITE, nullptr, &hKey, nullptr) == ERROR_SUCCESS) {
+			std::wstring mainPath = edt->GetText();
+			std::wstring followPath = edtf->GetText();
+			RegSetValueEx(hKey, L"MainPath", 0, REG_SZ,
+				(const BYTE*)mainPath.c_str(), (mainPath.size() + 1) * sizeof(wchar_t));
+			RegSetValueEx(hKey, L"FollowPath", 0, REG_SZ,
+				(const BYTE*)followPath.c_str(), (followPath.size() + 1) * sizeof(wchar_t));
+			RegCloseKey(hKey);
+		}
+	}
+
+	
+	void AddLog(const std::wstring& msg) {
+		std::lock_guard<std::mutex> lock(logMutex);
+		logMessages.push_front({ msg, GetTickCount() });
+		if (logMessages.size() > 10) { 
+			logMessages.pop_back();
+		}
+	}
 };
 
+
+std::wstring GetNormalizedProcessPath(HANDLE hProcess) {
+	WCHAR szPath[MAX_PATH];
+	DWORD size = MAX_PATH;
+	if (!QueryFullProcessImageName(hProcess, 0, szPath, &size))
+		return L"";
+	// 转换为长路径
+	WCHAR longPath[MAX_PATH];
+	if (GetLongPathName(szPath, longPath, MAX_PATH) == 0)
+		wcscpy_s(longPath, szPath);
+	// 转为大写以便比较
+	_wcsupr_s(longPath);
+	return std::wstring(longPath);
+}
 
 VinaWindow* MainWindow = new VinaWindow;
 
@@ -111,7 +180,9 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
 
 	auto ctx = std::make_shared<MainAppContext>();
 
-	MainWindow->Set(100, 100, 720 * gScale, 480 * gScale, L"Vina.Class.App.Main.Test", L"Vilinko VinaUI");
+	MainWindow->Set(100, 100, 770 * gScale, 440 * gScale, L"Vina.Class.App.Main.Test", L"Vilinko VinaUI");
+
+
 
 	MainWindow->CreatePanel([ctx](HWND hWnd, ID2D1HwndRenderTarget* hrt)->void {
 
@@ -131,15 +202,213 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
 
 		if (ctx->currentTabIndex == 0) {
 
-			ctx->btn->Set(40, 120, 140, 60, L"Button", [] {return 0; });
+			std::wstring description = L"选择要启动的主程序，再选择要随之启动的联动程序，点击启动按钮后，当主程序运行时，联动程序就会自动启动\n";
+			D2DDrawText(hrt, description.c_str(), 40, 100, 610, 100, 16,
+				((COLORREF)(((BYTE)(vuicolor.txt_r) | ((WORD)((BYTE)(vuicolor.txt_g)) << 8)) | (((DWORD)(BYTE)(vuicolor.txt_b)) << 16))), L"Segoe UI", 0.9f);
+
+			std::wstring maindescrip = L"主程序";
+			D2DDrawText(hrt, maindescrip.c_str(), 75, 182, 560, 100, 16,
+				VERTEXUICOLOR_WHITE, L"Segoe UI", 0.9f);
+
+			if (ctx->edt->cx == 0)
+			{
+				ctx->edt->Set(110, 100, 300, 30, L"请选择要启动的主程序");
+			}
+			ctx->edt->Set2(170, 178, 350, 30, VERTEXUICOLOR_MIDNIGHT, VERTEXUICOLOR_WHITE);
+			MainWindow->GetPanel()->Add(ctx->edt);
+
+			ctx->btn->Set(560, 178, 60, 30, L"浏览", [ctx] {
+				OPENFILENAME ofn = { 0 };
+				wchar_t szFile[260] = { 0 };
+				ofn.lStructSize = sizeof(ofn);
+				ofn.hwndOwner = MainWindow->GetHandle();      
+				ofn.lpstrFile = szFile;
+				ofn.nMaxFile = sizeof(szFile) / sizeof(wchar_t);
+				ofn.lpstrFilter = L"Executable Files\0*.exe\0All Files\0*.*\0";
+				ofn.nFilterIndex = 1;
+				ofn.Flags = OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST;  
+
+				if (GetOpenFileName(&ofn)) {
+					ctx->edt->SetText(szFile);
+					ctx->SavePaths();
+				}
+			});
 			MainWindow->GetPanel()->Add(ctx->btn);
 
-			ctx->sli->Set(40, 200, 140, 30, -1, VERTEXUICOLOR_DARKEN, L"Slider", [] {});
-			MainWindow->GetPanel()->Add(ctx->sli);
+			std::wstring followdescrip = L"联动程序";
+			D2DDrawText(hrt, followdescrip.c_str(), 62, 220, 560, 100, 16,
+				VERTEXUICOLOR_WHITE, L"Segoe UI", 0.9f);
 
-			ctx->sw->Set(40, 255, 60, 30, { VERTEXUICOLOR_DARKEN }, [] {});
-			MainWindow->GetPanel()->Add(ctx->sw);
+			if (ctx->edtf->cx == 0)
+			{
+				ctx->edtf->Set(100, 100, 300, 30, L"请选择要被启动的程序");
+			}
+			ctx->edtf->Set2(170, 218, 350, 30, VERTEXUICOLOR_MIDNIGHT, VERTEXUICOLOR_WHITE);
+			MainWindow->GetPanel()->Add(ctx->edtf);
 
+			ctx->btnf->Set(560, 218, 60, 30, L"浏览", [ctx] {
+				OPENFILENAME ofn = { 0 };
+				wchar_t szFile[260] = { 0 };
+				ofn.lStructSize = sizeof(ofn);
+				ofn.hwndOwner = MainWindow->GetHandle();       
+				ofn.lpstrFile = szFile;
+				ofn.nMaxFile = sizeof(szFile) / sizeof(wchar_t);
+				ofn.lpstrFilter = L"All Files\0*.*\0Executable Files\0*.exe\0";
+				ofn.nFilterIndex = 1;
+				ofn.Flags = OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST;  
+
+				if (GetOpenFileName(&ofn)) {
+					ctx->edtf->SetText(szFile);
+					ctx->SavePaths();
+				}
+			});
+			MainWindow->GetPanel()->Add(ctx->btnf);
+
+			ctx->startBtn->Set(80, 300, 144, 62, L"启动", [ctx] {
+				if (ctx->monitoring) {
+					// 正在监控 -> 停止监控
+					ctx->stopMonitoring = true;
+					ctx->startBtn->SetText(L"停止中...");
+					InvalidateRect(MainWindow->GetHandle(), nullptr, FALSE);
+				}
+				else {
+					// 未监控 -> 开始监控
+					std::wstring mainPath = ctx->edt->GetText();
+					std::wstring followPath = ctx->edtf->GetText();
+					if (mainPath.empty() || followPath.empty()) {
+						MessageBox(MainWindow->GetHandle(), L"请选择主程序和联动程序", L"提示", MB_OK);
+						return;
+					}
+
+					ctx->monitoring = true;
+					ctx->stopMonitoring = false;
+					ctx->monitoringFinished = false;
+					ctx->followLaunchFailed = false;
+
+					ctx->SavePaths();
+					ctx->startBtn->SetText(L"停止监控");
+					ctx->AddLog(L"开始监控主程序...");
+					InvalidateRect(MainWindow->GetHandle(), nullptr, FALSE);
+
+					std::thread([ctx, mainPath, followPath]() {
+						WCHAR mainLong[MAX_PATH], followLong[MAX_PATH];
+						GetLongPathName(mainPath.c_str(), mainLong, MAX_PATH);
+						GetLongPathName(followPath.c_str(), followLong, MAX_PATH);
+						_wcsupr_s(mainLong);
+						_wcsupr_s(followLong);
+						std::wstring normMain = mainLong;
+						std::wstring normFollow = followLong;
+						bool lastMainRunning = false;
+
+						while (!ctx->stopMonitoring) {
+							bool mainRunning = false;
+
+							HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+							if (hSnapshot != INVALID_HANDLE_VALUE) {
+								PROCESSENTRY32 pe32;
+								pe32.dwSize = sizeof(PROCESSENTRY32);
+								if (Process32First(hSnapshot, &pe32)) {
+									do {
+										HANDLE hProcess = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, pe32.th32ProcessID);
+										if (hProcess) {
+											std::wstring procPath = GetNormalizedProcessPath(hProcess);
+											CloseHandle(hProcess);
+											if (procPath == normMain) {
+												mainRunning = true;
+												break;
+											}
+										}
+									} while (Process32Next(hSnapshot, &pe32));
+								}
+								CloseHandle(hSnapshot);
+							}
+
+							if (mainRunning && !lastMainRunning) {
+								ctx->AddLog(L"检测到主程序运行");
+
+								bool followRunning = false;
+								hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+								if (hSnapshot != INVALID_HANDLE_VALUE) {
+									PROCESSENTRY32 pe32;
+									pe32.dwSize = sizeof(PROCESSENTRY32);
+									if (Process32First(hSnapshot, &pe32)) {
+										do {
+											HANDLE hProcess = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, pe32.th32ProcessID);
+											if (hProcess) {
+												std::wstring procPath = GetNormalizedProcessPath(hProcess);
+												CloseHandle(hProcess);
+												if (procPath == normFollow) {
+													followRunning = true;
+													break;
+												}
+											}
+										} while (Process32Next(hSnapshot, &pe32));
+									}
+									CloseHandle(hSnapshot);
+								}
+
+								if (!followRunning) {
+									ctx->AddLog(L"正在启动联动程序");
+									HINSTANCE result = ShellExecute(nullptr, L"open", followPath.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+									if ((INT_PTR)result <= 32) {
+										ctx->followLaunchFailed = true;
+										ctx->AddLog(L"联动程序启动失败");
+									}
+									else {
+										ctx->AddLog(L"联动程序启动成功");
+									}
+								}
+								else {
+									ctx->AddLog(L"联动程序已在运行");
+								}
+							}
+
+							lastMainRunning = mainRunning;
+
+							Sleep(1000); 
+						}
+						ctx->monitoring = false;
+						ctx->monitoringFinished = true;
+						InvalidateRect(MainWindow->GetHandle(), nullptr, FALSE);
+						}).detach();
+				}
+			});
+			MainWindow->GetPanel()->Add(ctx->startBtn);
+			\
+			const float logAreaX = 550.0f;
+			const float logAreaY = 300.0f;      
+			const float logAreaHeight = 120.0f; 
+			const float lineHeight = 20.0f;     
+			const int maxLines = static_cast<int>(logAreaHeight / lineHeight);
+
+			// 绘制日志
+			{
+				std::lock_guard<std::mutex> lock(ctx->logMutex);
+				DWORD now = GetTickCount();
+				\
+				ctx->logMessages.remove_if([now](const MainAppContext::LogMessage& msg) {
+					return (now - msg.startTick) >= 3000;
+					});
+				
+				int line = 0;
+				for (auto it = ctx->logMessages.rbegin(); it != ctx->logMessages.rend(); ++it) {
+					if (line >= maxLines) break;  
+
+					float y = logAreaY + logAreaHeight - (line + 1) * lineHeight;
+
+					D2DDrawText(hrt, it->text.c_str(), logAreaX, y, 300, lineHeight,
+						14, VERTEXUICOLOR_FOREST, L"Segoe UI", 1.0f);
+
+					line++;
+				}
+			}
+
+			//ctx->sli->Set(40, 200, 140, 30, -1, VERTEXUICOLOR_DARKEN, L"Slider", [] {});
+			//MainWindow->GetPanel()->Add(ctx->sli);
+
+			//ctx->sw->Set(40, 255, 60, 30, { VERTEXUICOLOR_DARKEN }, [] {});
+			//MainWindow->GetPanel()->Add(ctx->sw);
+			/*
 			if (ctx->sw->GetValue())
 			{
 				ctx->fi->Set(40, 300, 260, 160);
@@ -150,16 +419,12 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
 				MainWindow->GetPanel()->Add(ctx->fi);
 			}
 
-			ctx->mt->Set(260, 120, 300, 100, L"This is a test string.\nAnd this is a multi line text area.\ne.g:\n1\n2\n3\n4\n5\n6\n7\n8\n9\n10");
+
+			ctx->mt->Set(260, 120, 300, 30, L"This is a test string.\nAnd this is a multi line text area.\ne.g:\n1\n2\n3\n4\n5\n6\n7\n8\n9\n10");
 			ctx->mt->SetParent(MainWindow->GetPanel());
 			MainWindow->GetPanel()->Add(ctx->mt);
 
-			if (ctx->edt->cx == 0)/*这里为了演示方便，做简单的初始化。实际使用建议将Set移动到外层。*/
-			{
-				ctx->edt->Set(260, 240, 300, 30, L"This is a Edit...");
-			}
-			ctx->edt->Set2(260, 240, 300, 35, VERTEXUICOLOR_MIDNIGHT, VERTEXUICOLOR_WHITE);
-			MainWindow->GetPanel()->Add(ctx->edt);
+			*/
 
 			/*
 			此处演示动画效果，以及动画播放时的内存管理。
@@ -169,6 +434,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
 			此处为了演示方便，直接在 CreatePanel 内部操作。
 			*/
 
+			/*
 			std::wstring currentText = ctx->edt->GetText();
 
 			if (currentText != ctx->lastText) {
@@ -204,6 +470,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
 				}
 				ctx->lastText = currentText;
 			}
+			*/
 
 			//清理
 			ctx->animatingChars.remove_if([&](const CharAnim& c) {
@@ -223,6 +490,18 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
 			float startX_txt = 260.0f;
 			float startY_txt = 290.0f;
 
+			if (ctx->monitoringFinished) {
+				ctx->monitoringFinished = false;
+				ctx->startBtn->SetText(L"启动");
+				ctx->AddLog(L"已停止监控主程序");
+				InvalidateRect(MainWindow->GetHandle(), nullptr, FALSE);
+			}
+
+			if (ctx->followLaunchFailed) {
+				ctx->AddLog(L"启动联动程序失败");
+				ctx->followLaunchFailed = false;
+			}
+
 			for (auto& item : ctx->animatingChars) {
 				D2DDrawText2(hrt, std::wstring(1, item.ch).c_str(),
 					startX_txt + item.xOffset, startY_txt + item.yOffset,
@@ -231,86 +510,6 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
 			}
 		}
 		if (ctx->currentTabIndex == 1)
-		{
-			float delta = MainWindow->GetPanel()->GetInstantScrollDepth();
-			ctx->scrollVal -= delta;
-			if (ctx->scrollVal > 0.0f) ctx->scrollVal = 0.0f;
-
-			float viewWidth = rc.right / gScale;
-			float viewHeight = rc.bottom / gScale;
-			float cardW = (viewWidth - 60.0f) / 2.0f;
-			float cardH = 150.0f;
-			float spacing = 20.0f;
-			float startY = 120.0f;
-
-			int rowCount = (int)ceil(ctx->waterfallData.size() / 2.0f);
-			float totalContentHeight = startY + rowCount * (cardH + spacing);
-
-			float minScroll = viewHeight - totalContentHeight - 50.0f;
-			if (minScroll > 0) minScroll = 0;
-			if (ctx->scrollVal < minScroll) ctx->scrollVal = minScroll;
-
-			// 触发加载
-			if (totalContentHeight + ctx->scrollVal < viewHeight + 100.0f && ctx->waterfallData.size() < 200) {
-				ctx->GenerateCards(6);
-			}
-
-			
-			for (size_t i = 0; i < ctx->waterfallData.size(); i++) {
-				auto& card = ctx->waterfallData[i];
-				int row = (int)(i / 2);
-				int col = (int)(i % 2);
-
-				float drawX = 20.0f + col * (cardW + spacing);
-				float drawY = startY + row * (cardH + spacing) + ctx->scrollVal;
-
-				// 剪裁
-				if (drawY + cardH < 0) continue;
-				if (drawY > viewHeight) break;
-
-				
-				if (!card.animated) {
-					// 渲染排队
-					if (ctx->activeAnimationCount < 2) {
-						card.animated = true;
-						ctx->activeAnimationCount++;
-
-						MainWindow->AnimateVariableWithBezier(hWnd, card.alpha, 0.0f, 1.0f, 0.5);
-						MainWindow->AnimateVariableWithBezier(hWnd, card.animY, 30.0f, 0.0f, 0.6,
-							0.25, 0.1, 0.25, 1.0,
-							[ctx, &card] {
-								card.animY = 0.0f;
-								card.alpha = 1.0f;
-								if (ctx->activeAnimationCount > 0) ctx->activeAnimationCount--;
-							}
-						);
-					}
-				}
-				else {
-			    // 同步动画位置
-					if (card.alpha > 0.0f && card.alpha < 1.0f) {
-						card.alpha += 0.08f;
-						card.animY -= 2.4f; 
-						if (card.alpha >= 1.0f) {
-							card.alpha = 1.0f;
-							card.animY = 0.0f;
-							
-							if (ctx->activeAnimationCount > 0) ctx->activeAnimationCount--;
-						}
-					}
-				}
-
-				if (card.animated) {
-					float finalY = drawY + (card.animY < 0 ? 0 : card.animY);
-
-					D2DDrawQuickShadow(hrt, drawX, finalY, cardW, cardH, 10, 0, 2, 10, 5, 0, 0.05f * card.alpha, VERTEXUICOLOR_WHITE);
-					D2DDrawRoundRect(hrt, drawX, finalY, cardW, cardH, card.color, 12, card.alpha);
-					if(card.text.c_str())D2DDrawText3(hrt, card.text.c_str(), drawX + 15, finalY+cardH - 45, cardW - 30, cardH - 30, 20,
-						VERTEXUICOLOR_WHITEDRAW, L"Segoe UI", card.alpha * 0.9f);
-				}
-			}
-		}
-		if (ctx->currentTabIndex == 2)
 		{
 			float pageX = 60.0f;
 			float pageY = 120.0f;
@@ -367,7 +566,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
 		}
 		D2DCreateQuickHeavyBlur(hrt, 0, 0, rc.right, 90 * gScale, 12);
 
-		ctx->capt->Set(0, 0, rc.right / gScale - 160, 40, L"VinaUI App", VERTEXUICOLOR_DARKNIGHT, 18);
+		ctx->capt->Set(0, 0, rc.right / gScale - 160, 40, L"Linker", VERTEXUICOLOR_DARKNIGHT, 18);
 		MainWindow->GetPanel()->Add(ctx->capt);
 
 		static std::shared_ptr<VinaFAIcon>close = std::make_shared<VinaFAIcon>();
@@ -414,10 +613,11 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
 		});
 
 	MainWindow->SetOutFrame(VinaWindow::Client);
-	MainWindow->OnCreateCmd = [] {
+	MainWindow->OnCreateCmd = [ctx] {
 		CenterWindow(MainWindow->GetHandle());
 		MainWindow->InitAnimation();
 		MainWindow->StartAnimationSystem();
+		ctx->LoadPaths();
 		};
 	MainWindow->RunFull();
 

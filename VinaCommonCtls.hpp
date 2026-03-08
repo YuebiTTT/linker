@@ -24,13 +24,14 @@ struct VertexUICtlColor
 };
 class VinaButton : public VertexUIControl {
 public:
+	bool bSetText = false;
 	void Set(int x, int y, int cx, int cy, const wchar_t* txt, std::function<void()>events = [] {}, unsigned long clr = VERTEXUICOLOR_MIDNIGHT, int TxtSize = 15, unsigned long TxtColor = VERTEXUICOLOR_WHITE)
 	{
 		this->func = events;
 		this->Clr = clr;
 		this->txtsz = TxtSize;
 		this->txtClr = TxtColor;
-		this->txt = txt;
+		if(!bSetText)this->txt = txt;
 		this->x = x;
 		this->y = y;
 		this->cx = cx;
@@ -42,6 +43,11 @@ public:
 		this->y = y;
 		this->cx = cx;
 		this->cy = cy;
+	}
+	void SetText(const std::wstring& newText, const  bool& bRefresh = false) {
+		this->txt = newText;
+		bSetText = true;
+		if(bRefresh) Refresh(hWnd);     
 	}
 	virtual void CreateCtl(HWND hWnd, HRT hdc)
 	{
@@ -1609,6 +1615,7 @@ protected:
 
 class VinaEdit : public VertexUIControl {
 public:
+	bool bSetText = false;
 	void Set(int x, int y, int cx, int cy, const wchar_t* placeholder = L"",
 		std::function<void(std::wstring)> onEnterEvents = [](std::wstring) {},
 		unsigned long clr = VERTEXUICOLOR_MIDNIGHT,
@@ -1624,7 +1631,7 @@ public:
 		this->Clr = clr;
 		this->txtColor = txtClr;
 		this->textSize = (float)txtSize;
-		this->text = L"";
+		if(!bSetText)this->text = L"";
 		this->caretPos = 0;
 		this->selStart = 0;
 		this->selEnd = 0;
